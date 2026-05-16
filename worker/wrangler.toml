@@ -1,0 +1,13 @@
+name = "cnpj-certidoes"
+main = "worker.js"
+compatibility_date = "2026-05-15"
+
+# A URL final ficará algo como:
+#   https://cnpj-certidoes.<seu-subdomain>.workers.dev
+#
+# Para configurar os secrets (NÃO commitar a chave da InfoSimples):
+#   wrangler secret put INFOSIMPLES_TOKEN
+#   wrangler secret put ALLOWED_ORIGIN   # ex.: https://contabilidadeqem.github.io
+
+[vars]
+# ALLOWED_ORIGIN = "https://contabilidadeqem.github.io"
