@@ -1,0 +1,1034 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#0b1020" />
+  <title>Consulta CNPJ</title>
+
+  <!-- Tailwind v3 via Play CDN: zero build -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- React 18 + Babel standalone (transforma JSX no navegador) -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <style>
+    html, body, #root { height: 100%; }
+    body {
+      background:
+        radial-gradient(1200px 600px at 10% -10%, rgba(99,102,241,0.22), transparent 60%),
+        radial-gradient(900px 600px at 100% 110%, rgba(16,185,129,0.12), transparent 60%),
+        linear-gradient(180deg, #0b1020 0%, #0a0f1c 100%);
+      color: #e5e7eb;
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+        "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+      min-height: 100vh;
+    }
+    ::selection { background: rgba(129,140,248,0.35); color: #fff; }
+    *::-webkit-scrollbar { width: 10px; height: 10px; }
+    *::-webkit-scrollbar-track { background: transparent; }
+    *::-webkit-scrollbar-thumb { background: rgba(148,163,184,0.25); border-radius: 9999px; }
+    *::-webkit-scrollbar-thumb:hover { background: rgba(148,163,184,0.45); }
+    .fade-in { animation: fade-in .35s ease-out both; }
+    @keyframes fade-in {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+  </style>
+</head>
+<body class="antialiased">
+  <div id="root"></div>
+
+  <script type="text/babel" data-presets="react">
+  /* ============================================================
+     CONSULTA CNPJ — versão standalone (sem build, sem dependências)
+     ============================================================ */
+  const { useState, useMemo, useEffect } = React;
+
+  /* >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+     CONFIGURAÇÃO — URL do seu Cloudflare Worker para certidões.
+     Exemplo: 'https://cnpj-certidoes.SEU-USUARIO.workers.dev'
+     Deixe vazio ('') para manter apenas o registro manual.
+     >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> */
+  const WORKER_URL = 'https://certidoes-api.contabilidade-qem.workers.dev';
+
+  /* ---------- Utilitários de formatação ---------- */
+  const onlyDigits = (s) => String(s ?? '').replace(/\D/g, '');
+
+  function maskCnpjInput(raw) {
+    const d = onlyDigits(raw).slice(0, 14);
+    if (d.length <= 2) return d;
+    if (d.length <= 5) return `${d.slice(0,2)}.${d.slice(2)}`;
+    if (d.length <= 8) return `${d.slice(0,2)}.${d.slice(2,5)}.${d.slice(5)}`;
+    if (d.length <= 12) return `${d.slice(0,2)}.${d.slice(2,5)}.${d.slice(5,8)}/${d.slice(8)}`;
+    return `${d.slice(0,2)}.${d.slice(2,5)}.${d.slice(5,8)}/${d.slice(8,12)}-${d.slice(12)}`;
+  }
+  function formatCnpj(v) {
+    const d = onlyDigits(v);
+    if (d.length !== 14) return String(v ?? '');
+    return `${d.slice(0,2)}.${d.slice(2,5)}.${d.slice(5,8)}/${d.slice(8,12)}-${d.slice(12)}`;
+  }
+  function formatCpf(v) {
+    const d = onlyDigits(v);
+    if (d.length !== 11) return String(v ?? '');
+    return `${d.slice(0,3)}.${d.slice(3,6)}.${d.slice(6,9)}-${d.slice(9)}`;
+  }
+  function formatCep(v) {
+    const d = onlyDigits(v);
+    if (d.length !== 8) return String(v ?? '');
+    return `${d.slice(0,5)}-${d.slice(5)}`;
+  }
+  function formatPhone(ddd, num) {
+    const d = onlyDigits(num);
+    if (!d) return '';
+    const ddPart = ddd ? `(${onlyDigits(ddd)}) ` : '';
+    if (d.length === 8) return `${ddPart}${d.slice(0,4)}-${d.slice(4)}`;
+    if (d.length === 9) return `${ddPart}${d.slice(0,5)}-${d.slice(5)}`;
+    return `${ddPart}${d}`;
+  }
+  function formatDate(v) {
+    if (v === null || v === undefined || v === '') return '';
+    const s = String(v);
+    const m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?/.exec(s);
+    if (m) {
+      const [, y, mo, d, hh, mm] = m;
+      return hh ? `${d}/${mo}/${y} ${hh}:${mm}` : `${d}/${mo}/${y}`;
+    }
+    return s;
+  }
+  function formatCurrency(v) {
+    if (v === null || v === undefined || v === '') return '';
+    const n = Number(String(v).replace(',', '.'));
+    if (Number.isNaN(n)) return String(v);
+    return n.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL', minimumFractionDigits: 2 });
+  }
+  function smartFormat(key, value) {
+    if (value === null || value === undefined || value === '') return '';
+    const k = String(key || '').toLowerCase();
+    if (typeof value === 'boolean') return value ? 'Sim' : 'Não';
+    if (k === 'cnpj' || k === 'cnpj_raiz' || k.endsWith('_cnpj')) return formatCnpj(value);
+    if (k === 'cpf' || k.endsWith('_cpf')) return formatCpf(value);
+    if (k === 'cep' || k.endsWith('_cep')) return formatCep(value);
+    if (k === 'capital_social' || k.includes('valor') || k.includes('faturamento') || k.includes('receita')) return formatCurrency(value);
+    if (k.startsWith('data_') || k.endsWith('_em') || k === 'atualizado_em' || k === 'criado_em') return formatDate(value);
+    return String(value);
+  }
+  function countFields(value, counter = { total: 0, filled: 0 }) {
+    if (Array.isArray(value)) value.forEach((v) => countFields(v, counter));
+    else if (value !== null && typeof value === 'object') Object.values(value).forEach((v) => countFields(v, counter));
+    else {
+      counter.total += 1;
+      if (value !== null && value !== undefined && value !== '') counter.filled += 1;
+    }
+    return counter;
+  }
+  function humanizeKey(key) {
+    if (!key) return '';
+    return String(key)
+      .replace(/_/g, ' ')
+      .replace(/\b\w/g, (c) => c.toUpperCase())
+      .replace(/\bCnpj\b/, 'CNPJ').replace(/\bCpf\b/, 'CPF').replace(/\bCep\b/, 'CEP')
+      .replace(/\bDdd\b/, 'DDD').replace(/\bIbge\b/, 'IBGE').replace(/\bUf\b/, 'UF')
+      .replace(/\bIso2\b/, 'ISO 2').replace(/\bIso3\b/, 'ISO 3');
+  }
+  const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+  const isPrimitive = (v) => v === null || ['string','number','boolean','undefined'].includes(typeof v);
+
+  /* ---------- Certidões: configuração e persistência ---------- */
+  const CERT_TYPES = [
+    { key: 'federal',   label: 'Federal (Receita + PGFN)',   short: 'Federal' },
+    { key: 'estadual',  label: 'Estadual (SEFAZ)',           short: 'Estadual' },
+    { key: 'municipal', label: 'Municipal (ISS)',            short: 'Municipal' },
+    { key: 'fgts',      label: 'FGTS (Caixa)',               short: 'FGTS' },
+  ];
+  const CERT_STATUS = [
+    { value: 'nao_consultada',   label: 'Não consultada',                cls: 'bg-slate-500/15 text-slate-300 ring-slate-500/30',     dot: 'bg-slate-400' },
+    { value: 'negativa',         label: 'Negativa',                       cls: 'bg-emerald-500/15 text-emerald-300 ring-emerald-500/30', dot: 'bg-emerald-400' },
+    { value: 'positiva_efeitos', label: 'Positiva c/ efeitos de negativa',cls: 'bg-amber-500/15 text-amber-300 ring-amber-500/30',    dot: 'bg-amber-400' },
+    { value: 'positiva',         label: 'Positiva (com pendências)',      cls: 'bg-red-500/15 text-red-300 ring-red-500/30',          dot: 'bg-red-400' },
+    { value: 'pendente',         label: 'Pendente / Indisponível',        cls: 'bg-yellow-500/15 text-yellow-300 ring-yellow-500/30', dot: 'bg-yellow-400' },
+  ];
+  const CERT_STATUS_BY = Object.fromEntries(CERT_STATUS.map((s) => [s.value, s]));
+
+  function loadCertidoes(cnpj) {
+    if (!cnpj) return {};
+    try {
+      const raw = localStorage.getItem(`cnd:${onlyDigits(cnpj)}`);
+      return raw ? JSON.parse(raw) : {};
+    } catch { return {}; }
+  }
+  function saveCertidoes(cnpj, data) {
+    if (!cnpj) return;
+    try { localStorage.setItem(`cnd:${onlyDigits(cnpj)}`, JSON.stringify(data)); } catch {}
+  }
+  function clearCertidoes(cnpj) {
+    if (!cnpj) return;
+    try { localStorage.removeItem(`cnd:${onlyDigits(cnpj)}`); } catch {}
+  }
+
+  /* ---------- Ícones SVG inline ---------- */
+  const svgBase = { width:18, height:18, viewBox:'0 0 24 24', fill:'none', stroke:'currentColor', strokeWidth:2, strokeLinecap:'round', strokeLinejoin:'round' };
+  const SearchIcon = (p) => <svg {...svgBase} {...p}><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>;
+  const CopyIcon   = (p) => <svg {...svgBase} {...p}><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>;
+  const CheckIcon  = (p) => <svg {...svgBase} {...p}><path d="M20 6 9 17l-5-5"/></svg>;
+  const CodeIcon   = (p) => <svg {...svgBase} {...p}><path d="m8 6-6 6 6 6"/><path d="m16 6 6 6-6 6"/></svg>;
+  const GridIcon   = (p) => <svg {...svgBase} {...p}><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>;
+  const AlertIcon  = (p) => <svg {...svgBase} {...p}><path d="M12 2 2 22h20L12 2Z"/><path d="M12 10v5"/><circle cx="12" cy="18" r="0.6" fill="currentColor"/></svg>;
+  const BuildingIcon = (p) => <svg {...svgBase} {...p}><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M9 7h.01M15 7h.01M9 11h.01M15 11h.01M9 15h.01M15 15h.01"/><path d="M10 21v-4h4v4"/></svg>;
+  const MapPinIcon = (p) => <svg {...svgBase} {...p}><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></svg>;
+  const PhoneIcon  = (p) => <svg {...svgBase} {...p}><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92Z"/></svg>;
+  const MailIcon   = (p) => <svg {...svgBase} {...p}><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>;
+  const TagIcon    = (p) => <svg {...svgBase} {...p}><path d="M20 12 12 4H4v8l8 8 8-8Z"/><circle cx="8" cy="8" r="1.5"/></svg>;
+  const HashIcon   = (p) => <svg {...svgBase} {...p}><path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/></svg>;
+  const ChevronIcon = ({ open, ...p }) =>
+    <svg {...svgBase} {...p} style={{ transition:'transform .2s', transform: open ? 'rotate(90deg)' : 'rotate(0)' }}>
+      <path d="m9 6 6 6-6 6"/>
+    </svg>;
+
+  /* ---------- Formulário ---------- */
+  function CnpjForm({ onSubmit, loading }) {
+    const [value, setValue] = useState('');
+    const [touched, setTouched] = useState(false);
+    const digits = onlyDigits(value);
+    const isValid = digits.length === 14;
+    const showError = touched && value.length > 0 && !isValid;
+
+    return (
+      <form onSubmit={(e) => { e.preventDefault(); setTouched(true); if (isValid && !loading) onSubmit(digits); }} className="w-full">
+        <label htmlFor="cnpj" className="block text-sm font-medium text-slate-300 mb-2">CNPJ</label>
+        <div className="flex flex-col sm:flex-row gap-3">
+          <input
+            id="cnpj" type="text" inputMode="numeric" autoComplete="off"
+            placeholder="00.000.000/0000-00" value={value}
+            onChange={(e) => setValue(maskCnpjInput(e.target.value))}
+            onPaste={(e) => { const t = e.clipboardData.getData('text'); if (t) { e.preventDefault(); setValue(maskCnpjInput(t)); } }}
+            onBlur={() => setTouched(true)}
+            className={`w-full rounded-xl bg-slate-900/60 border px-4 py-3 text-lg tracking-wide
+              text-white placeholder-slate-500 outline-none transition
+              focus:ring-2 focus:ring-indigo-500/60 focus:border-indigo-400
+              ${showError ? 'border-red-500/60' : 'border-white/10'}`}
+            aria-invalid={showError}
+          />
+          <button
+            type="submit" disabled={!isValid || loading}
+            className="inline-flex items-center justify-center gap-2 rounded-xl
+              bg-gradient-to-br from-indigo-500 to-violet-600 px-5 py-3 font-semibold
+              text-white shadow-lg shadow-indigo-900/30 transition
+              hover:from-indigo-400 hover:to-violet-500 active:scale-[.98]
+              disabled:cursor-not-allowed disabled:opacity-50">
+            <SearchIcon />{loading ? 'Consultando…' : 'Consultar'}
+          </button>
+        </div>
+        {showError && <p className="mt-2 text-sm text-red-400">Informe um CNPJ com 14 dígitos.</p>}
+        <p className="mt-2 text-xs text-slate-500">Os dados são obtidos da API pública publica.cnpj.ws.</p>
+      </form>
+    );
+  }
+
+  /* ---------- Resumo ---------- */
+  function StatusPill({ status }) {
+    const s = String(status || '').toLowerCase();
+    const styles =
+      s === 'ativa' ? 'bg-emerald-500/15 text-emerald-300 ring-emerald-500/30' :
+      s === 'baixada' ? 'bg-red-500/15 text-red-300 ring-red-500/30' :
+      (s === 'suspensa' || s === 'inapta') ? 'bg-amber-500/15 text-amber-300 ring-amber-500/30' :
+      'bg-slate-500/15 text-slate-300 ring-slate-500/30';
+    return (
+      <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-semibold ring-1 ${styles}`}>
+        <span className="h-1.5 w-1.5 rounded-full bg-current" />{status || '—'}
+      </span>
+    );
+  }
+  function InfoCard({ icon: Icon, title, children }) {
+    return (
+      <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4 backdrop-blur transition hover:bg-white/[0.05]">
+        <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
+          <Icon />{title}
+        </div>
+        <div className="text-sm text-slate-100">{children}</div>
+      </div>
+    );
+  }
+  function Field({ label, value, mono = false }) {
+    return (
+      <div>
+        <div className="text-[11px] uppercase tracking-wider text-slate-500">{label}</div>
+        <div className={`text-sm text-slate-100 ${mono ? 'font-mono' : ''}`}>
+          {value || <span className="text-slate-500">—</span>}
+        </div>
+      </div>
+    );
+  }
+  function Summary({ data }) {
+    const est = data?.estabelecimento ?? {};
+    const cidade = est?.cidade?.nome;
+    const uf = est?.estado?.sigla;
+    const cnae = est?.atividade_principal;
+    const cnaeSec = est?.atividades_secundarias ?? [];
+    const tel1 = formatPhone(est?.ddd1, est?.telefone1);
+    const tel2 = formatPhone(est?.ddd2, est?.telefone2);
+    const ies = est?.inscricoes_estaduais ?? [];
+    const endereco = [[est?.tipo_logradouro, est?.logradouro].filter(Boolean).join(' '), est?.numero, est?.complemento].filter(Boolean).join(', ');
+    const bairroCepLinha = [est?.bairro, est?.cep ? `CEP ${formatCep(est.cep)}` : null].filter(Boolean).join(' — ');
+
+    return (
+      <section className="fade-in space-y-4">
+        <div className="rounded-2xl border border-white/10 bg-gradient-to-br from-white/[0.06] to-white/[0.02] p-6 backdrop-blur">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div className="min-w-0">
+              <div className="text-xs uppercase tracking-wider text-indigo-300">
+                {data?.porte?.descricao || 'Empresa'}
+                {data?.natureza_juridica?.descricao ? ` · ${data.natureza_juridica.descricao}` : ''}
+              </div>
+              <h2 className="mt-1 truncate text-2xl font-semibold text-white sm:text-3xl">{data?.razao_social || '—'}</h2>
+              {est?.nome_fantasia && (
+                <div className="mt-1 text-slate-300"><span className="text-slate-500">Nome fantasia:</span> {est.nome_fantasia}</div>
+              )}
+              <div className="mt-3 flex flex-wrap items-center gap-2 text-sm text-slate-300">
+                <span className="font-mono">{formatCnpj(est?.cnpj || data?.cnpj_raiz)}</span>
+                <span className="text-slate-600">•</span>
+                <span>{est?.tipo || '—'}</span>
+                <span className="text-slate-600">•</span>
+                <StatusPill status={est?.situacao_cadastral} />
+              </div>
+            </div>
+            {data?.capital_social && (
+              <div className="rounded-xl border border-white/10 bg-slate-900/50 px-4 py-3 text-right">
+                <div className="text-[11px] uppercase tracking-wider text-slate-400">Capital social</div>
+                <div className="mt-0.5 text-lg font-semibold text-emerald-300">{formatCurrency(data.capital_social)}</div>
+              </div>
+            )}
+          </div>
+
+          <div className="mt-5 grid grid-cols-2 gap-4 sm:grid-cols-4">
+            <Field label="Início atividade" value={formatDate(est?.data_inicio_atividade)} />
+            <Field label="Data situação" value={formatDate(est?.data_situacao_cadastral)} />
+            <Field label="Motivo situação" value={est?.motivo_situacao_cadastral || ''} />
+            <Field label="Sócios" value={Array.isArray(data?.socios) ? String(data.socios.length) : ''} />
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+          <InfoCard icon={MapPinIcon} title="Endereço">
+            <div className="space-y-1">
+              <div>{endereco || <span className="text-slate-500">—</span>}</div>
+              {bairroCepLinha && <div className="text-slate-300">{bairroCepLinha}</div>}
+              <div className="text-slate-300">{[cidade, uf].filter(Boolean).join(' / ') || '—'}</div>
+            </div>
+          </InfoCard>
+
+          <InfoCard icon={TagIcon} title="CNAE Principal">
+            {cnae ? (
+              <div className="space-y-1">
+                <div className="font-mono text-indigo-300">{cnae.id || cnae.subclasse}</div>
+                <div>{cnae.descricao}</div>
+              </div>
+            ) : <span className="text-slate-500">—</span>}
+            {cnaeSec.length > 0 && (
+              <div className="mt-3 border-t border-white/5 pt-3">
+                <div className="text-[11px] uppercase tracking-wider text-slate-500">Secundárias ({cnaeSec.length})</div>
+                <ul className="mt-1 space-y-0.5 text-xs text-slate-400">
+                  {cnaeSec.slice(0, 4).map((c, i) => (
+                    <li key={i} className="truncate">
+                      <span className="font-mono text-slate-500">{c.id || c.subclasse}</span> {c.descricao}
+                    </li>
+                  ))}
+                  {cnaeSec.length > 4 && <li>+ {cnaeSec.length - 4} adicionais</li>}
+                </ul>
+              </div>
+            )}
+          </InfoCard>
+
+          <InfoCard icon={PhoneIcon} title="Contato">
+            <div className="space-y-1">
+              <div>{tel1 || <span className="text-slate-500">Telefone —</span>}</div>
+              {tel2 && <div className="text-slate-300">{tel2}</div>}
+              <div className="flex items-center gap-1.5 text-slate-300">
+                <MailIcon width={14} height={14} />
+                {est?.email ? (
+                  <a href={`mailto:${est.email}`} className="text-indigo-300 hover:text-indigo-200 hover:underline">{est.email}</a>
+                ) : <span className="text-slate-500">—</span>}
+              </div>
+            </div>
+          </InfoCard>
+
+          <InfoCard icon={BuildingIcon} title="Empresa">
+            <div className="space-y-2">
+              <Field label="Porte" value={data?.porte?.descricao} />
+              <Field label="Natureza Jurídica" value={data?.natureza_juridica?.descricao} />
+              <Field label="Qualif. responsável" value={data?.qualificacao_do_responsavel?.descricao} />
+            </div>
+          </InfoCard>
+
+          <InfoCard icon={HashIcon} title={`Inscrições Estaduais (${ies.length})`}>
+            {ies.length === 0 ? <span className="text-slate-500">Nenhuma encontrada</span> : (
+              <ul className="space-y-1.5">
+                {ies.map((ie, i) => (
+                  <li key={i} className="flex items-center justify-between rounded-lg bg-slate-900/40 px-2.5 py-1.5">
+                    <span className="font-mono text-sm">{ie.inscricao_estadual || '—'}</span>
+                    <span className="flex items-center gap-2 text-xs">
+                      <span className="text-slate-400">{ie?.estado?.sigla}</span>
+                      <span className={`rounded-full px-2 py-0.5 ring-1 ${ie.ativo ? 'bg-emerald-500/15 text-emerald-300 ring-emerald-500/30' : 'bg-slate-500/15 text-slate-400 ring-slate-500/30'}`}>
+                        {ie.ativo ? 'Ativa' : 'Inativa'}
+                      </span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </InfoCard>
+
+          <InfoCard icon={BuildingIcon} title={`Sócios (${data?.socios?.length || 0})`}>
+            {!data?.socios?.length ? <span className="text-slate-500">Nenhum sócio listado</span> : (
+              <ul className="space-y-1.5">
+                {data.socios.slice(0, 4).map((s, i) => (
+                  <li key={i} className="truncate">
+                    <span className="text-slate-100">{s.nome}</span>
+                    {s?.qualificacao_socio?.descricao && (
+                      <span className="text-slate-500"> — {humanizeKey(s.qualificacao_socio.descricao)}</span>
+                    )}
+                  </li>
+                ))}
+                {data.socios.length > 4 && <li className="text-xs text-slate-500">+ {data.socios.length - 4} adicionais</li>}
+              </ul>
+            )}
+          </InfoCard>
+        </div>
+      </section>
+    );
+  }
+
+  /* ---------- Seção de Certidões (registro manual) ---------- */
+  function CertidaoCard({ type, value, onChange, loading }) {
+    const status = value.status || 'nao_consultada';
+    const opt = CERT_STATUS_BY[status] || CERT_STATUS_BY.nao_consultada;
+    const isNegativa = status === 'negativa';
+    const needsMotivo = status !== 'nao_consultada' && status !== 'negativa';
+
+    return (
+      <div className={`relative rounded-2xl border border-white/10 bg-white/[0.03] p-4 backdrop-blur space-y-3 ${loading ? 'opacity-70' : ''}`}>
+        {loading && (
+          <div className="absolute inset-0 z-10 grid place-items-center rounded-2xl bg-slate-950/40">
+            <div className="flex items-center gap-2 rounded-full bg-slate-900/80 px-3 py-1.5 text-xs text-slate-200 ring-1 ring-white/10">
+              <span className="h-2 w-2 animate-pulse rounded-full bg-indigo-400" />
+              Consultando…
+            </div>
+          </div>
+        )}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <div className="text-sm font-semibold text-slate-100">{type.label}</div>
+            {value.fonte === 'auto' && (
+              <span className="rounded-full bg-indigo-500/15 px-1.5 py-0.5 text-[10px] font-medium text-indigo-300 ring-1 ring-indigo-500/30">
+                auto
+              </span>
+            )}
+          </div>
+          <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-semibold ring-1 ${opt.cls}`}>
+            <span className={`h-1.5 w-1.5 rounded-full ${opt.dot}`} />{opt.label}
+          </span>
+        </div>
+        {value.numero_controle && (
+          <div className="text-[11px] text-slate-400">
+            Nº de controle: <span className="font-mono text-slate-200">{value.numero_controle}</span>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <label className="text-xs">
+            <span className="text-slate-500 mb-1 block">Status</span>
+            <select
+              value={status}
+              onChange={(e) => onChange({ status: e.target.value })}
+              className="w-full rounded-lg bg-slate-900/60 border border-white/10 px-2.5 py-1.5 text-sm text-white outline-none transition focus:ring-2 focus:ring-indigo-500/60 focus:border-indigo-400">
+              {CERT_STATUS.map((o) => <option key={o.value} value={o.value} className="bg-slate-900">{o.label}</option>)}
+            </select>
+          </label>
+
+          <label className="text-xs">
+            <span className="text-slate-500 mb-1 block">Data da consulta</span>
+            <input
+              type="date"
+              value={value.data_consulta || ''}
+              onChange={(e) => onChange({ data_consulta: e.target.value })}
+              className="w-full rounded-lg bg-slate-900/60 border border-white/10 px-2.5 py-1.5 text-sm text-white outline-none transition focus:ring-2 focus:ring-indigo-500/60 focus:border-indigo-400" />
+          </label>
+        </div>
+
+        {isNegativa && (
+          <label className="text-xs block">
+            <span className="text-slate-500 mb-1 block">Válida até (opcional)</span>
+            <input
+              type="date"
+              value={value.validade || ''}
+              onChange={(e) => onChange({ validade: e.target.value })}
+              className="w-full rounded-lg bg-slate-900/60 border border-white/10 px-2.5 py-1.5 text-sm text-white outline-none transition focus:ring-2 focus:ring-indigo-500/60 focus:border-indigo-400" />
+          </label>
+        )}
+
+        {needsMotivo && (
+          <label className="text-xs block">
+            <span className="text-slate-500 mb-1 block">Motivo / observação</span>
+            <textarea
+              rows={2}
+              value={value.motivo || ''}
+              onChange={(e) => onChange({ motivo: e.target.value })}
+              placeholder="Por que a certidão não pôde ser retirada como negativa..."
+              className="w-full resize-none rounded-lg bg-slate-900/60 border border-white/10 px-2.5 py-1.5 text-sm text-white outline-none transition focus:ring-2 focus:ring-indigo-500/60 focus:border-indigo-400" />
+          </label>
+        )}
+
+        {value.atualizado_em && (
+          <div className="text-[10px] text-slate-500">
+            Atualizado em {formatDate(value.atualizado_em)}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function mapWorkerToLocal(workerRes) {
+    if (!workerRes) return null;
+    const status = workerRes.status === 'erro' ? 'pendente' : workerRes.status;
+    const data_consulta =
+      (workerRes.data_emissao && formatDate(workerRes.data_emissao).slice(6, 10) +
+        '-' + formatDate(workerRes.data_emissao).slice(3, 5) +
+        '-' + formatDate(workerRes.data_emissao).slice(0, 2)) ||
+      new Date().toISOString().slice(0, 10);
+    const validade = workerRes.validade
+      ? (workerRes.validade.length === 10 && workerRes.validade.includes('/')
+          ? workerRes.validade.split('/').reverse().join('-')
+          : workerRes.validade.slice(0, 10))
+      : '';
+    return {
+      status,
+      data_consulta,
+      validade,
+      motivo: workerRes.motivo || (workerRes.status === 'erro' ? workerRes.motivo : '') || workerRes.label || '',
+      numero_controle: workerRes.numero_controle || '',
+      fonte: 'auto',
+      atualizado_em: workerRes.consultado_em || new Date().toISOString(),
+    };
+  }
+
+  function CertidoesSection({ cnpj, uf }) {
+    const [records, setRecords] = useState(() => loadCertidoes(cnpj));
+    const [loadingMap, setLoadingMap] = useState({});
+    const [autoError, setAutoError] = useState(null);
+
+    useEffect(() => {
+      setRecords(loadCertidoes(cnpj));
+      setLoadingMap({});
+      setAutoError(null);
+    }, [cnpj]);
+
+    function update(key, patch) {
+      const next = {
+        ...records,
+        [key]: { ...(records[key] || {}), ...patch, atualizado_em: new Date().toISOString() },
+      };
+      setRecords(next);
+      saveCertidoes(cnpj, next);
+    }
+    function handleClear() {
+      if (window.confirm('Apagar todos os registros de certidões deste CNPJ?')) {
+        clearCertidoes(cnpj);
+        setRecords({});
+      }
+    }
+
+    async function consultarTipo(tipo) {
+      if (!WORKER_URL) return { tipo, ok: false, msg: 'Worker não configurado' };
+      setLoadingMap((m) => ({ ...m, [tipo]: true }));
+      try {
+        const params = tipo === 'estadual' && uf ? `?uf=${uf}` : '';
+        const r = await fetch(`${WORKER_URL}/certidao/${tipo}/${onlyDigits(cnpj)}${params}`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const data = await r.json();
+        const local = mapWorkerToLocal(data);
+        if (local) {
+          setRecords((prev) => {
+            const next = { ...prev, [tipo]: local };
+            saveCertidoes(cnpj, next);
+            return next;
+          });
+        }
+        return { tipo, ok: true };
+      } catch (e) {
+        return { tipo, ok: false, msg: e.message };
+      } finally {
+        setLoadingMap((m) => ({ ...m, [tipo]: false }));
+      }
+    }
+
+    async function consultarUma(tipo) {
+      setAutoError(null);
+      const res = await consultarTipo(tipo);
+      if (!res.ok) setAutoError(`Não foi possível consultar a certidão ${tipo}: ${res.msg}.`);
+    }
+
+    async function consultarTodas() {
+      setAutoError(null);
+      // 3 chamadas independentes em paralelo: se uma falhar, as demais preenchem.
+      const resultados = await Promise.all(
+        ['federal', 'estadual', 'fgts'].map((t) => consultarTipo(t)),
+      );
+      const falhas = resultados.filter((r) => !r.ok);
+      if (falhas.length) {
+        setAutoError(
+          `Não foi possível consultar: ${falhas.map((f) => f.tipo).join(', ')}. ` +
+            `Verifique sua conexão e tente novamente. Detalhe: ${falhas[0].msg}`,
+        );
+      }
+    }
+
+    const summary = CERT_TYPES.map((t) => {
+      const s = records[t.key]?.status || 'nao_consultada';
+      return { ...t, statusOpt: CERT_STATUS_BY[s] };
+    });
+
+    const anyLoading = Object.values(loadingMap).some(Boolean);
+    const autoEnabled = !!WORKER_URL;
+
+    return (
+      <section className="fade-in space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="text-lg font-semibold text-white">Certidões</h3>
+            <p className="text-xs text-slate-500">
+              {autoEnabled
+                ? 'Consulta automática via InfoSimples + registro manual. Resultados salvos por CNPJ no seu navegador.'
+                : 'Registros salvos localmente no seu navegador, por CNPJ. Não saem deste dispositivo.'}
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {summary.map((s) => (
+              <span key={s.key} className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium ring-1 ${s.statusOpt.cls}`}>
+                <span className={`h-1.5 w-1.5 rounded-full ${s.statusOpt.dot}`} />{s.short}
+              </span>
+            ))}
+            <button
+              type="button"
+              onClick={handleClear}
+              className="ml-1 rounded-md border border-white/10 bg-slate-900/60 px-2 py-1 text-[11px] text-slate-400 transition hover:bg-slate-800 hover:text-red-300">
+              Limpar
+            </button>
+          </div>
+        </div>
+
+        {autoEnabled && (
+          <div className="flex flex-wrap items-center gap-2 rounded-xl border border-indigo-500/20 bg-indigo-500/[0.06] px-3 py-2">
+            <button
+              type="button"
+              onClick={consultarTodas}
+              disabled={anyLoading}
+              className="inline-flex items-center gap-2 rounded-lg bg-gradient-to-br from-indigo-500 to-violet-600 px-3 py-1.5 text-sm font-semibold text-white shadow shadow-indigo-900/30 transition hover:from-indigo-400 hover:to-violet-500 active:scale-[.98] disabled:cursor-not-allowed disabled:opacity-50">
+              {anyLoading ? 'Consultando…' : 'Consultar automaticamente'}
+            </button>
+            <span className="text-xs text-slate-400">
+              Federal, Estadual {uf ? `(${uf})` : '(UF não detectada)'} e FGTS.
+            </span>
+            <span className="ml-auto text-[11px] text-slate-500">Municipal segue manual.</span>
+          </div>
+        )}
+
+        {autoError && (
+          <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+            {autoError}
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+          {CERT_TYPES.map((t) => (
+            <div key={t.key} className="relative">
+              <CertidaoCard
+                type={t}
+                value={records[t.key] || {}}
+                onChange={(patch) => update(t.key, patch)}
+                loading={!!loadingMap[t.key]}
+              />
+              {autoEnabled && t.key !== 'municipal' && (
+                <button
+                  type="button"
+                  onClick={() => consultarUma(t.key)}
+                  disabled={!!loadingMap[t.key]}
+                  title="Consultar essa certidão"
+                  className="absolute right-3 top-3 z-20 rounded-md border border-white/10 bg-slate-900/60 px-2 py-0.5 text-[10px] text-slate-300 transition hover:bg-slate-800 hover:text-white disabled:opacity-50">
+                  ⟳ atualizar
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      </section>
+    );
+  }
+
+  /* ---------- Renderizador dinâmico ---------- */
+  function Empty() { return <span className="text-slate-500">—</span>; }
+
+  function PrimitiveValue({ keyName, value }) {
+    if (value === null || value === undefined || value === '') return <Empty />;
+    const k = String(keyName || '').toLowerCase();
+    if (typeof value === 'boolean') {
+      return (
+        <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-semibold ring-1 ${value ? 'bg-emerald-500/15 text-emerald-300 ring-emerald-500/30' : 'bg-slate-500/15 text-slate-400 ring-slate-500/30'}`}>
+          {value ? 'Sim' : 'Não'}
+        </span>
+      );
+    }
+    if (k === 'email' && typeof value === 'string' && value.includes('@')) {
+      return <a href={`mailto:${value}`} className="text-indigo-300 hover:text-indigo-200 hover:underline break-all">{value}</a>;
+    }
+    const formatted = smartFormat(keyName, value);
+    const looksMono = ['cnpj','cnpj_raiz','cpf','cep','id'].includes(k) || k.endsWith('_cnpj') || k.endsWith('_cpf') || k.endsWith('_cep') || k.endsWith('_id');
+    return <span className={`text-slate-100 break-words ${looksMono ? 'font-mono text-[13px]' : ''}`}>{formatted}</span>;
+  }
+
+  function ObjectArrayTable({ items, parentKey }) {
+    const allKeys = useMemo(() => {
+      const set = new Set();
+      items.forEach((it) => { if (isPlainObject(it)) Object.keys(it).forEach((k) => set.add(k)); });
+      return Array.from(set);
+    }, [items]);
+    const allPrimitive = items.every((it) => isPlainObject(it) && Object.values(it).every((v) => isPrimitive(v) || v === undefined));
+
+    if (!allPrimitive) {
+      return (
+        <div className="space-y-2">
+          {items.map((it, i) => (
+            <div key={i} className="rounded-lg border border-white/5 bg-slate-900/40 p-3">
+              <div className="mb-2 text-[11px] uppercase tracking-wider text-slate-500">#{i + 1}</div>
+              <DynamicNode value={it} parentKey={parentKey} />
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    return (
+      <div className="overflow-x-auto rounded-lg border border-white/5">
+        <table className="min-w-full text-sm">
+          <thead className="bg-slate-900/60 text-left">
+            <tr>
+              <th className="px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400">#</th>
+              {allKeys.map((k) => (
+                <th key={k} className="px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400">{humanizeKey(k)}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-white/5">
+            {items.map((it, i) => (
+              <tr key={i} className="hover:bg-white/[0.03]">
+                <td className="px-3 py-2 text-slate-500">{i + 1}</td>
+                {allKeys.map((k) => (
+                  <td key={k} className="px-3 py-2 align-top"><PrimitiveValue keyName={k} value={it?.[k]} /></td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
+
+  function PrimitiveArrayList({ items, parentKey }) {
+    return (
+      <ul className="flex flex-wrap gap-1.5">
+        {items.map((v, i) => (
+          <li key={i} className="rounded-md border border-white/10 bg-slate-900/40 px-2 py-1 text-xs">
+            <PrimitiveValue keyName={parentKey} value={v} />
+          </li>
+        ))}
+      </ul>
+    );
+  }
+
+  function DynamicNode({ value, parentKey }) {
+    if (isPrimitive(value)) return <PrimitiveValue keyName={parentKey} value={value} />;
+    if (Array.isArray(value)) {
+      if (value.length === 0) return <Empty />;
+      if (value.every(isPrimitive)) return <PrimitiveArrayList items={value} parentKey={parentKey} />;
+      if (value.every(isPlainObject)) return <ObjectArrayTable items={value} parentKey={parentKey} />;
+      return (
+        <div className="space-y-2">
+          {value.map((v, i) => (
+            <div key={i} className="rounded-lg border border-white/5 bg-slate-900/40 p-3">
+              <div className="mb-1 text-[11px] uppercase tracking-wider text-slate-500">#{i + 1}</div>
+              <DynamicNode value={v} parentKey={parentKey} />
+            </div>
+          ))}
+        </div>
+      );
+    }
+    if (isPlainObject(value)) {
+      const entries = Object.entries(value);
+      if (entries.length === 0) return <Empty />;
+      return (
+        <dl className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          {entries.map(([k, v]) => <KeyValueRow key={k} keyName={k} value={v} />)}
+        </dl>
+      );
+    }
+    return <span className="text-slate-500">{String(value)}</span>;
+  }
+
+  function KeyValueRow({ keyName, value }) {
+    const nested = isPlainObject(value) || (Array.isArray(value) && value.length > 0);
+    if (nested) {
+      return (
+        <div className="sm:col-span-2 rounded-xl border border-white/5 bg-slate-900/30 p-3">
+          <div className="mb-2 flex items-center justify-between">
+            <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">{humanizeKey(keyName)}</div>
+            {Array.isArray(value) && (
+              <span className="rounded-full bg-slate-700/40 px-2 py-0.5 text-[10px] text-slate-300">
+                {value.length} {value.length === 1 ? 'item' : 'itens'}
+              </span>
+            )}
+          </div>
+          <DynamicNode value={value} parentKey={keyName} />
+        </div>
+      );
+    }
+    return (
+      <div className="flex flex-col gap-0.5">
+        <dt className="text-[11px] uppercase tracking-wider text-slate-500">{humanizeKey(keyName)}</dt>
+        <dd><PrimitiveValue keyName={keyName} value={value} /></dd>
+      </div>
+    );
+  }
+
+  function Section({ keyName, value, defaultOpen = true }) {
+    const [open, setOpen] = useState(defaultOpen);
+    const isArr = Array.isArray(value);
+    const count = isArr ? value.length : isPlainObject(value) ? Object.keys(value).length : null;
+    return (
+      <div className="rounded-2xl border border-white/10 bg-white/[0.02] backdrop-blur">
+        <button type="button" onClick={() => setOpen((o) => !o)} className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition hover:bg-white/[0.03]">
+          <div className="flex items-center gap-2">
+            <ChevronIcon open={open} />
+            <span className="font-semibold text-slate-100">{humanizeKey(keyName)}</span>
+            {count !== null && (
+              <span className="rounded-full bg-slate-700/40 px-2 py-0.5 text-[10px] text-slate-300">
+                {count} {isArr ? (count === 1 ? 'item' : 'itens') : 'campos'}
+              </span>
+            )}
+          </div>
+        </button>
+        {open && <div className="border-t border-white/5 px-4 py-4"><DynamicNode value={value} parentKey={keyName} /></div>}
+      </div>
+    );
+  }
+
+  function DynamicView({ data }) {
+    if (!data) return null;
+    const entries = Object.entries(data);
+    const primitives = entries.filter(([, v]) => isPrimitive(v));
+    const complex = entries.filter(([, v]) => !isPrimitive(v));
+    return (
+      <div className="fade-in space-y-4">
+        {primitives.length > 0 && (
+          <div className="rounded-2xl border border-white/10 bg-white/[0.02] p-4 backdrop-blur">
+            <h3 className="mb-3 text-sm font-semibold uppercase tracking-wider text-slate-400">Campos gerais</h3>
+            <dl className="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3">
+              {primitives.map(([k, v]) => (
+                <div key={k} className="flex flex-col gap-0.5">
+                  <dt className="text-[11px] uppercase tracking-wider text-slate-500">{humanizeKey(k)}</dt>
+                  <dd><PrimitiveValue keyName={k} value={v} /></dd>
+                </div>
+              ))}
+            </dl>
+          </div>
+        )}
+        {complex.map(([k, v]) => (
+          <Section key={k} keyName={k} value={v} defaultOpen={!Array.isArray(v) || v.length <= 5} />
+        ))}
+      </div>
+    );
+  }
+
+  /* ---------- JSON bruto com syntax highlighting ---------- */
+  function highlight(json) {
+    const escaped = json.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    return escaped.replace(
+      /("(\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
+      (match) => {
+        let cls = 'text-emerald-300';
+        if (/^"/.test(match)) cls = /:$/.test(match) ? 'text-sky-300' : 'text-amber-200';
+        else if (/true|false/.test(match)) cls = 'text-fuchsia-300';
+        else if (/null/.test(match)) cls = 'text-slate-500';
+        return `<span class="${cls}">${match}</span>`;
+      }
+    );
+  }
+  function JsonView({ data }) {
+    const html = useMemo(() => highlight(JSON.stringify(data, null, 2)), [data]);
+    return (
+      <div className="fade-in rounded-2xl border border-white/10 bg-slate-950/70 p-4 backdrop-blur">
+        <pre className="overflow-auto whitespace-pre text-[12.5px] leading-relaxed font-mono text-slate-200"
+             dangerouslySetInnerHTML={{ __html: html }} />
+      </div>
+    );
+  }
+
+  /* ---------- Barra de ações ---------- */
+  function ActionsBar({ data, viewMode, onChangeMode }) {
+    const [copied, setCopied] = useState(false);
+    const { total, filled } = countFields(data);
+    const pct = total ? Math.round((filled / total) * 100) : 0;
+    async function handleCopy() {
+      try {
+        await navigator.clipboard.writeText(JSON.stringify(data, null, 2));
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      } catch {}
+    }
+    return (
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/[0.03] p-3 backdrop-blur">
+        <div className="flex items-center gap-3">
+          <div className="text-sm text-slate-300">
+            <span className="font-semibold text-white">{filled}</span>
+            <span className="text-slate-500"> / {total} campos preenchidos</span>
+          </div>
+          <div className="h-2 w-32 overflow-hidden rounded-full bg-slate-800">
+            <div className="h-full bg-gradient-to-r from-emerald-400 to-indigo-400 transition-[width] duration-500" style={{ width: `${pct}%` }} />
+          </div>
+          <span className="text-xs text-slate-400">{pct}%</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="inline-flex rounded-xl bg-slate-900/60 p-1 ring-1 ring-white/10">
+            <button type="button" onClick={() => onChangeMode('detail')}
+              className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm transition ${viewMode === 'detail' ? 'bg-indigo-500/90 text-white shadow' : 'text-slate-300 hover:bg-white/5'}`}>
+              <GridIcon width={16} height={16} />Visual
+            </button>
+            <button type="button" onClick={() => onChangeMode('json')}
+              className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm transition ${viewMode === 'json' ? 'bg-indigo-500/90 text-white shadow' : 'text-slate-300 hover:bg-white/5'}`}>
+              <CodeIcon width={16} height={16} />JSON
+            </button>
+          </div>
+          <button type="button" onClick={handleCopy}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-white/10 bg-slate-900/60 px-3 py-1.5 text-sm text-slate-200 transition hover:bg-slate-800">
+            {copied ? <CheckIcon width={16} height={16} /> : <CopyIcon width={16} height={16} />}
+            {copied ? 'Copiado!' : 'Copiar JSON'}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  /* ---------- App ---------- */
+  async function fetchCnpj(cnpj) {
+    const r = await fetch(`https://publica.cnpj.ws/cnpj/${cnpj}`, { headers: { Accept: 'application/json' } });
+    if (!r.ok) {
+      let body = null;
+      try { body = await r.json(); } catch {}
+      const msg = body?.detalhes || body?.titulo ||
+        (r.status === 404 ? 'CNPJ não encontrado.' :
+         r.status === 429 ? 'Limite da API pública excedido (3 req/min). Tente novamente em alguns segundos.' :
+         `Erro ${r.status} ao consultar a API.`);
+      throw new Error(msg);
+    }
+    return r.json();
+  }
+
+  function LoadingState() {
+    return (
+      <div className="fade-in space-y-3">
+        <div className="h-32 animate-pulse rounded-2xl bg-white/[0.04]" />
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {[0,1,2,3,4,5].map((i) => <div key={i} className="h-28 animate-pulse rounded-2xl bg-white/[0.04]" />)}
+        </div>
+      </div>
+    );
+  }
+
+  function EmptyState() {
+    return (
+      <div className="rounded-2xl border border-dashed border-white/10 bg-white/[0.01] p-10 text-center">
+        <div className="mx-auto mb-3 grid h-12 w-12 place-items-center rounded-2xl bg-slate-800/60 text-slate-300">
+          <SearchIcon width={22} height={22} />
+        </div>
+        <p className="text-slate-300">Informe um CNPJ acima para visualizar os dados da empresa.</p>
+        <p className="mt-1 text-xs text-slate-500">
+          Exemplos: <span className="font-mono">00.000.000/0001-91</span>, <span className="font-mono">33.000.167/0001-01</span>
+        </p>
+      </div>
+    );
+  }
+
+  function App() {
+    const [data, setData] = useState(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState(null);
+    const [viewMode, setViewMode] = useState('detail');
+
+    async function consultar(cnpj) {
+      setLoading(true); setError(null);
+      try {
+        const json = await fetchCnpj(cnpj);
+        setData(json);
+        setViewMode('detail');
+      } catch (e) {
+        setError(e.message || 'Falha ao consultar CNPJ.');
+        setData(null);
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    return (
+      <div className="mx-auto flex min-h-screen w-full max-w-6xl flex-col px-4 py-8 sm:py-12">
+        <header className="mb-8 sm:mb-10">
+          <div className="flex items-center gap-3">
+            <div className="grid h-10 w-10 place-items-center rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 text-white shadow-lg shadow-indigo-900/30">
+              <span className="font-bold">C</span>
+            </div>
+            <div>
+              <h1 className="text-2xl font-bold tracking-tight text-white sm:text-3xl">Consulta CNPJ</h1>
+              <p className="text-sm text-slate-400">Dados públicos da Receita Federal via publica.cnpj.ws</p>
+            </div>
+          </div>
+        </header>
+
+        <section className="rounded-2xl border border-white/10 bg-white/[0.03] p-5 backdrop-blur sm:p-6">
+          <CnpjForm onSubmit={consultar} loading={loading} />
+        </section>
+
+        <main className="mt-8 flex-1 space-y-6">
+          {loading && <LoadingState />}
+          {error && (
+            <div className="fade-in flex items-start gap-3 rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-red-200">
+              <AlertIcon className="mt-0.5 shrink-0" />
+              <div>
+                <div className="font-semibold">Não foi possível consultar</div>
+                <div className="text-sm text-red-200/80">{error}</div>
+              </div>
+            </div>
+          )}
+          {!loading && !error && !data && <EmptyState />}
+          {data && (
+            <>
+              <Summary data={data} />
+              <CertidoesSection
+                cnpj={data?.estabelecimento?.cnpj || data?.cnpj_raiz}
+                uf={data?.estabelecimento?.estado?.sigla || ''}
+              />
+              <ActionsBar data={data} viewMode={viewMode} onChangeMode={setViewMode} />
+              {viewMode === 'detail' ? <DynamicView data={data} /> : <JsonView data={data} />}
+            </>
+          )}
+        </main>
+
+        <footer className="mt-12 border-t border-white/5 pt-6 text-center text-xs text-slate-500">
+          Feito com React + Tailwind · Dados de domínio público
+        </footer>
+      </div>
+    );
+  }
+
+  ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
